@@ -1,11 +1,12 @@
 
-from machine import I2C, Pin
+from machine import I2C, Pin, unique_id
 from mpu6050 import MPU
 import network
 import neopixel
 import time
 import urequests
 import ujson
+import ubinascii
 from umqtt.simple import MQTTClient
 from secrets import (
     WIFI_SSID,
@@ -22,8 +23,10 @@ BROKER = "io.adafruit.com"
 
 ALERT_TOPIC = ("%s/f/alert" % AIO_USERNAME).encode("utf-8")
 CONFIG_TOPIC = ("%s/f/config" % AIO_USERNAME).encode("utf-8")
+CONFIG_STATE_TOPIC = ("%s/f/config-state" % AIO_USERNAME).encode("utf-8")
 
 NOTIFY_TITLE = "ESP32 Motion Alert"
+DEVICE_ID = ubinascii.hexlify(unique_id()).decode("utf-8")
 
 # =========================
 # Default runtime settings
@@ -112,7 +115,18 @@ def mqtt_callback(topic, msg):
                 print("Empty config payload received")
                 return
 
-            config = ujson.loads(msg_str)
+            message = ujson.loads(msg_str)
+
+            if message.get("device_id") != DEVICE_ID:
+                print("Ignoring config for device:", message.get("device_id"))
+                return
+
+            config = message.get("config")
+            if not isinstance(config, dict):
+                print("Config payload missing config object")
+                return
+
+            before_config = get_config_values()
 
             if "delta_threshold_x" in config:
                 delta_threshold_x = float(config["delta_threshold_x"])
@@ -151,6 +165,7 @@ def mqtt_callback(topic, msg):
                 if value >= 1:
                     window_size = value
 
+            after_config = get_config_values()
             config_received = True
 
             print("Applied config:")
@@ -161,13 +176,17 @@ def mqtt_callback(topic, msg):
             print(" feed_cooldown =", feed_cooldown)
             print(" notification_cooldown =", notification_cooldown)
             print(" armed =", armed)
+            if after_config != before_config:
+                publish_config_state(client, "config_update")
+            else:
+                print("Config unchanged; config state not republished")
 
     except Exception as e:
         print("Config handling error:", e)
 
 def connect_mqtt():
     client = MQTTClient(
-        client_id="esp32-motion-client",
+        client_id=("esp32-motion-client-" + DEVICE_ID),
         server=BROKER,
         user=AIO_USERNAME,
         password=AIO_KEY,
@@ -208,9 +227,42 @@ def trigger_notification(message):
         if response is not None:
             response.close()
 
-def publish_motion_event(client, payload):
+def publish_motion_event(client, event):
+    payload = ujson.dumps(event)
     client.publish(ALERT_TOPIC, payload.encode("utf-8"), qos=1)
     print("MQTT publish successful:", payload)
+
+def get_config_values():
+    return {
+        "delta_threshold_x": delta_threshold_x,
+        "delta_threshold_y": delta_threshold_y,
+        "delta_threshold_z": delta_threshold_z,
+        "feed_cooldown": feed_cooldown,
+        "notification_cooldown": notification_cooldown,
+        "armed": armed,
+        "sensor_interval": sensor_interval,
+        "window_size": window_size,
+        "detect_count_required": detect_count_required,
+        "clear_count_required": clear_count_required,
+    }
+
+def get_config_state_event(reason):
+    return {
+        "event": "config_state",
+        "reason": reason,
+        "device_id": DEVICE_ID,
+        "uptime_seconds": time.time(),
+        "config_received": config_received,
+        "config": get_config_values(),
+    }
+
+def publish_config_state(client, reason):
+    try:
+        payload = ujson.dumps(get_config_state_event(reason))
+        client.publish(CONFIG_STATE_TOPIC, payload.encode("utf-8"), retain=True, qos=1)
+        print("Config state published:", payload)
+    except Exception as e:
+        print("Config state publish failed:", e)
 
 def init_neopixel():
     global pixel
@@ -308,8 +360,10 @@ connect_wifi()
 client = connect_mqtt()
 
 wait_for_initial_config(client, timeout_seconds=3)
+publish_config_state(client, "startup")
 
 print("System ready.")
+print("Device ID =", DEVICE_ID)
 print("Config received at startup =", config_received)
 print("Monitoring for motion using continuous acceleration change...")
 
@@ -359,21 +413,32 @@ while True:
                 sent_update = False
 
                 if now - last_feed_time >= feed_cooldown:                                    
-                    payload = (
-                        "Motion detected {} | "
-                        "X={:.2f} Y={:.2f} Z={:.2f} | "
-                        "dX={:.2f} dY={:.2f} dZ={:.2f}"
-                    ).format(message_num, ax, ay, az, dx, dy, dz)
+                    event = {
+                        "event": "motion_detected",
+                        "device_id": DEVICE_ID,
+                        "message_num": message_num,
+                        "timestamp": now,
+                        "acceleration": {
+                            "x": ax,
+                            "y": ay,
+                            "z": az,
+                        },
+                        "delta": {
+                            "x": dx,
+                            "y": dy,
+                            "z": dz,
+                        },
+                    }
 
-                    publish_motion_event(client, payload)
+                    publish_motion_event(client, event)
                     last_feed_time = now
                     sent_update = True
 
                 if now - last_notification_time >= notification_cooldown:
                     notification_message = (
-                        "Motion {}: X={:.2f} Y={:.2f} Z={:.2f} | "
+                        "Device {} | Motion {}: X={:.2f} Y={:.2f} Z={:.2f} | "
                         "dX={:.2f} dY={:.2f} dZ={:.2f}"
-                    ).format(message_num, ax, ay, az, dx, dy, dz)
+                    ).format(DEVICE_ID, message_num, ax, ay, az, dx, dy, dz)
                     trigger_notification(notification_message)
                     last_notification_time = now
                     sent_update = True
