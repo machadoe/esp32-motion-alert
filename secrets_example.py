@@ -1,7 +1,11 @@
-WIFI_SSID = "replace-with-your-wifi-name"
-WIFI_PASSWORD = "replace-with-your-wifi-password"
+#
+# Add Wifi info. Then save this as secrets.py
+#
 
-AIO_USERNAME = "replace-with-your-adafruit-io-username"
+WIFI_SSID = "replace-with-your-wifi-name"   #Insert your SSID
+WIFI_PASSWORD = "replace-with-your-wifi-password"   #Insert your WiFi Password
+
+AIO_USERNAME = "edmachado"
 AIO_KEY = "replace-with-your-adafruit-io-key"
 
-NOTIFY_URL = "http://example.local:3000/notify"
+NOTIFY_URL = "http://mofongo.dyndns-home.com:3000/notify"
